@@ -1,0 +1,14 @@
+bin/
+dist/
+*.exe
+*.test
+*.out
+go.work
+go.work.sum
+
+.idea/
+.vscode/
+.DS_Store
+
+*.env
+.env.local

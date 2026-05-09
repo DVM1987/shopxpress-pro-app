@@ -1,0 +1,132 @@
+name: shopxpress-pro
+
+x-postgres-common: &postgres-common
+  image: postgres:16-alpine
+  restart: unless-stopped
+  environment:
+    POSTGRES_USER: app
+    POSTGRES_PASSWORD: app
+    POSTGRES_DB: app
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U app -d app"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+    start_period: 10s
+
+x-app-common: &app-common
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  products-db:
+    <<: *postgres-common
+    container_name: shopxpress-products-db
+    ports:
+      - "5433:5432"
+    volumes:
+      - products-db-data:/var/lib/postgresql/data
+
+  orders-db:
+    <<: *postgres-common
+    container_name: shopxpress-orders-db
+    ports:
+      - "5434:5432"
+    volumes:
+      - orders-db-data:/var/lib/postgresql/data
+
+  products-migrate:
+    image: migrate/migrate:v4.18.1
+    container_name: shopxpress-products-migrate
+    command:
+      - "-path"
+      - "/migrations"
+      - "-database"
+      - "postgres://app:app@products-db:5432/app?sslmode=disable"
+      - "up"
+    volumes:
+      - ./migrations/products:/migrations:ro
+    depends_on:
+      products-db:
+        condition: service_healthy
+    restart: "no"
+
+  orders-migrate:
+    image: migrate/migrate:v4.18.1
+    container_name: shopxpress-orders-migrate
+    command:
+      - "-path"
+      - "/migrations"
+      - "-database"
+      - "postgres://app:app@orders-db:5432/app?sslmode=disable"
+      - "up"
+    volumes:
+      - ./migrations/orders:/migrations:ro
+    depends_on:
+      orders-db:
+        condition: service_healthy
+    restart: "no"
+
+  products:
+    <<: *app-common
+    container_name: shopxpress-products
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: products
+    image: shopxpress-pro/products:dev
+    environment:
+      DATABASE_URL: postgres://app:app@products-db:5432/app?sslmode=disable
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      products-migrate:
+        condition: service_completed_successfully
+
+  orders:
+    <<: *app-common
+    container_name: shopxpress-orders
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: orders
+    image: shopxpress-pro/orders:dev
+    environment:
+      DATABASE_URL: postgres://app:app@orders-db:5432/app?sslmode=disable
+      PORT: "8082"
+    ports:
+      - "8082:8082"
+    depends_on:
+      orders-migrate:
+        condition: service_completed_successfully
+
+  gateway:
+    <<: *app-common
+    container_name: shopxpress-gateway
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: gateway
+    image: shopxpress-pro/gateway:dev
+    environment:
+      PRODUCTS_URL: http://products:8081
+      ORDERS_URL: http://orders:8082
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      products:
+        condition: service_started
+      orders:
+        condition: service_started
+
+volumes:
+  products-db-data:
+  orders-db-data:
