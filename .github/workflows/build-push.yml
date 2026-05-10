@@ -160,7 +160,7 @@ jobs:
       # exit-code: 1 → workflow đỏ ❌ nếu có HIGH/CRITICAL
       # ignore-unfixed → bỏ qua CVE chưa có patch (không thể fix)
       - name: Trivy vulnerability scan (gate HIGH+CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tag.outputs.IMAGE }}
           severity: HIGH,CRITICAL
