@@ -68,18 +68,21 @@ jobs:
               - 'go.mod'
               - 'go.sum'
               - 'Dockerfile'
+              - '.github/workflows/build-push.yml'
             products:
               - 'services/products/**'
               - 'pkg/**'
               - 'go.mod'
               - 'go.sum'
               - 'Dockerfile'
+              - '.github/workflows/build-push.yml'
             orders:
               - 'services/orders/**'
               - 'pkg/**'
               - 'go.mod'
               - 'go.sum'
               - 'Dockerfile'
+              - '.github/workflows/build-push.yml'
 
   # ============================================================
   # Job 2: build-scan-push (matrix per service)
