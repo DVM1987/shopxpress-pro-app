@@ -42,12 +42,12 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 2
 
+      # Bỏ ref/base — checkout đã set ref + fetch-depth: 2,
+      # paths-filter tự diff HEAD vs HEAD~1 (default mode for push event).
       - name: Filter changed paths
         id: filter
         uses: dorny/paths-filter@v3
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          base: ${{ github.event.workflow_run.head_sha }}~1
           filters: |
             gateway:
               - 'services/gateway/**'
