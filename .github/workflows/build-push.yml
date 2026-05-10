@@ -1,0 +1,189 @@
+name: build-push
+
+# Trigger:
+# - pull_request → build + test + scan, KHÔNG push (gate trước merge)
+# - push main    → build + test + scan + PUSH ECR (sau merge)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/**'
+      - 'pkg/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.github/workflows/build-push.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/**'
+      - 'pkg/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.github/workflows/build-push.yml'
+
+# OIDC bắt buộc id-token: write để xin JWT từ GitHub
+# contents: read đủ để actions/checkout
+permissions:
+  id-token: write
+  contents: read
+
+# Cancel run cũ nếu có push mới cùng branch (tiết kiệm minute)
+concurrency:
+  group: build-push-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REGISTRY: 527055790396.dkr.ecr.ap-southeast-1.amazonaws.com
+  IAM_ROLE_ARN: arn:aws:iam::527055790396:role/shopxpress-pro-nonprd-gha-ecr-push
+  GO_VERSION: '1.25'
+  IMAGE_PLATFORM: linux/arm64
+
+jobs:
+  # ============================================================
+  # Job 1: detect-changes
+  # ============================================================
+  # Phát hiện service nào thay đổi trong commit/PR.
+  # Output: JSON array vd ["gateway","products"] → feed vào matrix job 2.
+  # Sửa pkg/ hoặc go.mod → build cả 3 (shared code).
+  detect-changes:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            gateway:
+              - 'services/gateway/**'
+              - 'pkg/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Dockerfile'
+            products:
+              - 'services/products/**'
+              - 'pkg/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Dockerfile'
+            orders:
+              - 'services/orders/**'
+              - 'pkg/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Dockerfile'
+
+  # ============================================================
+  # Job 2: build-scan-push (matrix per service)
+  # ============================================================
+  # Chỉ chạy nếu detect-changes có output != [].
+  # Mỗi service chạy 1 runner song song (fail-fast: false để nhìn full picture).
+  build-scan-push:
+    name: ${{ matrix.service }}
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.services != '[]' && needs.detect-changes.outputs.services != '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect-changes.outputs.services) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─── Lint + Test (CI gate trước khi build image) ───
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Go vet
+        run: go vet ./services/${{ matrix.service }}/...
+
+      - name: Go test
+        run: go test -race -count=1 ./services/${{ matrix.service }}/...
+
+      # ─── OIDC handshake với AWS ───
+      # configure-aws-credentials sẽ:
+      # 1. Xin JWT từ GitHub OIDC issuer
+      # 2. Gọi sts:AssumeRoleWithWebIdentity với JWT đó
+      # 3. Set $AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN env tạm 1h
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-${{ matrix.service }}-${{ github.run_id }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ─── Build image ───
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "TAG=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=${{ env.ECR_REGISTRY }}/shopxpress-pro-${{ matrix.service }}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      # Build vào local Docker (load: true) để Trivy scan trước khi push
+      - name: Build image (load to local for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: |
+            SERVICE=${{ matrix.service }}
+          platforms: ${{ env.IMAGE_PLATFORM }}
+          push: false
+          load: true
+          tags: ${{ steps.tag.outputs.IMAGE }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # ─── Security gate ───
+      # exit-code: 1 → workflow đỏ ❌ nếu có HIGH/CRITICAL
+      # ignore-unfixed → bỏ qua CVE chưa có patch (không thể fix)
+      - name: Trivy vulnerability scan (gate HIGH+CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.tag.outputs.IMAGE }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+          vuln-type: 'os,library'
+
+      # ─── Push ECR (CHỈ khi push main, KHÔNG push trên PR) ───
+      - name: Push image to ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: |
+            SERVICE=${{ matrix.service }}
+          platforms: ${{ env.IMAGE_PLATFORM }}
+          push: true
+          tags: ${{ steps.tag.outputs.IMAGE }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## ${{ matrix.service }}"
+            echo "- Image: \`${{ steps.tag.outputs.IMAGE }}\`"
+            echo "- Pushed: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
