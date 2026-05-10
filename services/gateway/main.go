@@ -100,3 +100,5 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
+
+// CI test: trigger bot bump tag e2e (Sub-comp 0.7.8)
