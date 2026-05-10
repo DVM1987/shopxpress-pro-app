@@ -39,7 +39,7 @@ env:
   ECR_REGISTRY: 527055790396.dkr.ecr.ap-southeast-1.amazonaws.com
   IAM_ROLE_ARN: arn:aws:iam::527055790396:role/shopxpress-pro-nonprd-gha-ecr-push
   GO_VERSION: '1.25'
-  IMAGE_PLATFORM: linux/arm64
+  IMAGE_PLATFORM: linux/amd64
 
 jobs:
   # ============================================================
